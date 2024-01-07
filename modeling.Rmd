@@ -1,0 +1,238 @@
+---
+title: "DSM and Heterogeneity modeling"
+author: "Jihyeon bae"
+date: "2024-01-03"
+output: html_document
+---
+
+
+# Introduction
+
+## Background and Goals
+
+- Authoritarian Intergovernmental Organizations (AIGO): formal IGOs that largely comprise authoritarian states 
+  - Creating aggregate level variable based on country-level data
+  - Creating indices for robustness check
+
+- Finding distinctive patterns of AIO compared to democratic counterparts
+
+# Setup and packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("pacman")
+p_load(plyr, dplyr, tidyr, ggplot2, tidyverse, RColorBrewer, readxl,
+       readr, haven, countrycode,
+       rqog, igoR, modelsummary, knitr, kableExtra, flextable)
+
+```
+
+# Loading processed data
+```{r, echo=FALSE, warning=FALSE}
+igo_analysis<-readRDS("igo_analysis.RDS")
+```
+
+---
+
+# Data Analysis
+
+## Trend of International Organizations Over Time
+```{r, results='html', eval=FALSE}
+
+datasummary(All(igo_analysis) ~ Mean + SD + Min + Max, data = igo_analysis) %>%
+  kable(caption = "Data Summary") %>%
+  kable_styling(font_size = 12, latex_options = "scale_down", full_width = FALSE)
+
+```
+
+---
+
+## Automate the process
+```{r}
+dem_measure <- function(data, measure_var, threshold = 0.5) {
+  processed_data <- data %>%
+    mutate(AIGO = ifelse({{measure_var}} < threshold, 1, 0),
+           DIGO = ifelse({{measure_var}} >= threshold, 1, 0)) %>%
+    mutate_all(~ ifelse(is.nan(.), NA, .)) %>%
+    arrange(ioname, year) %>%
+    select(ioname, year, {{measure_var}}, everything()) %>%
+    as.data.frame()%>%
+    group_by(year) %>%
+    summarise(DIGO = sum(DIGO, na.rm=TRUE),
+            AIGO = sum(AIGO, na.rm=TRUE))
+    }
+  
+
+#analysis_polyarchy <- dem_measure(igo_dataset, polyarchy, threshold = 0.5)
+#analysis_percentage <- dem_measure(igo_dataset, percentage, threshold = 0.5)
+#analysis_polity <- dem_measure(igo_dataset, polity, threshold = 0)
+#analysis_libdem <- dem_measure(igo_dataset, libdem, threshold = 0.5)
+```
+
+
+---
+
+## Difference in Pattern?
+```{r}
+library(lmtest)
+library(plm)
+
+pooled<-lm(DSM~ polyarchy + polyarchy_sd +
+              econ_sd + gdp_cap + alliances + number + trade + political + social,
+            data = igo_analysis)
+
+model0 <-plm(DSM
+            ~ polyarchy + polyarchy_sd +
+              econ_sd,
+            data = igo_analysis,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+#summary(model0, vcovBK(model0))
+
+model1 <-plm(DSM
+            ~ polyarchy + polyarchy_sd +
+              hh_poly +
+              hh_gdp + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              fh_rol + wbgi_pve + 
+              cspf_sfi + alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year", "cow_igocode"),
+            model = "within",
+            effect = "twoways"
+)
+#summary(model1, vcovBK(model1))
+
+
+#serial correlation
+library(tseries)
+filtered_data<-igo_analysis%>%filter(!is.na(DS_sum_st))
+panel.set<-plm.data(filtered_data, index=c("cow_igocode", "year"))
+adf.test(panel.set$DS_sum_st)
+#no unit roots are present here. 
+
+bptest(DSM~polyarchy_sd + factor(cow_igocode), data=panel.set, studentize=F)
+#Heteroskedasticity detected. 
+
+model2 <-plm(DSM
+            ~ polyarchy + polyarchy_sd +
+              hh_poly +
+              hh_gdp + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              fh_rol + wbgi_pve + 
+              cspf_sfi + alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+#summary(model2, vcovBK(model2))
+```
+
+
+## Visualization of data itself
+```{r warning=FALSE}
+library(gplots)
+plotmeans(DS_sum_st~year, main="Heterogeneity across IGOs", data=igo_analysis)
+
+plotmeans(DS_sum_st~ioname, main="Heterogeneity across IGOs", data=igo_analysis)
+
+
+
+```
+
+## Visualizing models
+```{r}
+
+models <- list("Two-way"=model1, "Time FE"=model2) 
+
+result <- modelsummary(
+  models,
+  output = 'flextable',
+  stars = TRUE,
+  vcov = list(vcovBK(model1), vcovBK(model2)),
+  coef_omit = 'Interc',
+  inline_css = TRUE,
+  bold_italicize_data = TRUE,
+  italicize = TRUE,
+  font_size = "12pt",  
+  override_css = list("body" = "font-family: 'Times New Roman';")
+)
+
+result %>%  # text and background color
+    color(3, color = 'red') %>%
+    #bg(5, bg = 'lightblue') %>%
+    # column widths
+    autofit()
+
+
+```
+
+# Robustness check
+```{r}
+percentage <-plm(DSM
+            ~ percentage + polyarchy_sd +
+              hh_poly +
+              hh_gdp + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              fh_rol + wbgi_pve + 
+              cspf_sfi + alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year", "cow_igocode"),
+            model = "within",
+            effect = "twoway"
+)
+# summary(percentage, vcovBK(percentage))
+
+percentage2 <-plm(DSM
+            ~ percentage + polyarchy_sd +
+              hh_poly +
+              hh_gdp + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              fh_rol + wbgi_pve + 
+              cspf_sfi + alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+
+#summary(percentage2, vcovBK(percentage2))
+
+
+robust_models<- list("Two-way"=percentage, "Time FE"=percentage2) 
+
+
+robust_result <- modelsummary(
+  robust_models,
+  output = 'flextable',
+  stars = TRUE,
+  vcov = list(vcovBK(percentage), vcovBK(percentage2)),
+  coef_omit = 'Interc',
+  inline_css = TRUE,
+  bold_italicize_data = TRUE,
+  italicize = TRUE,
+  font_size = "12pt",  
+  override_css = list("body" = "font-family: 'Times New Roman';")
+)
+
+robust_result %>%  # text and background color
+    color(3, color = 'red') %>%
+    # bg(5, bg = 'lightblue') %>%
+    # column widths
+    autofit()
+```
