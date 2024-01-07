@@ -29,10 +29,10 @@ p_load(plyr, dplyr, tidyr, ggplot2, tidyverse, RColorBrewer, readxl,
 
 # Loading processed data
 ```{r, echo=FALSE, warning=FALSE}
-igo_analysis<-readRDS("igo_analysis.RDS")
+igo_analysis<-readRDS("data/processed/igo_analysis.RDS")
+igo_analysis<-igo_analysis%>%filter(year>=1970)
 ```
 
----
 
 # Data Analysis
 
@@ -45,9 +45,17 @@ datasummary(All(igo_analysis) ~ Mean + SD + Min + Max, data = igo_analysis) %>%
 
 ```
 
----
+## Visualization of data itself
+```{r warning=FALSE}
+library(gplots)
+plotmeans(DS_sum_st~year, main="Heterogeneity across IGOs", data=igo_analysis)
 
-## Automate the process
+plotmeans(DS_sum_st~ioname, main="Heterogeneity across IGOs", data=igo_analysis)
+
+```
+
+
+## Automate the process for other measures of democracy
 ```{r}
 dem_measure <- function(data, measure_var, threshold = 0.5) {
   processed_data <- data %>%
@@ -69,10 +77,7 @@ dem_measure <- function(data, measure_var, threshold = 0.5) {
 #analysis_libdem <- dem_measure(igo_dataset, libdem, threshold = 0.5)
 ```
 
-
----
-
-## Difference in Pattern?
+# Modeling Part 1 - General
 ```{r}
 library(lmtest)
 library(plm)
@@ -134,31 +139,18 @@ model2 <-plm(DSM
             model = "within",
             effect = "time"
 )
-#summary(model2, vcovBK(model2))
 ```
 
 
-## Visualization of data itself
-```{r warning=FALSE}
-library(gplots)
-plotmeans(DS_sum_st~year, main="Heterogeneity across IGOs", data=igo_analysis)
-
-plotmeans(DS_sum_st~ioname, main="Heterogeneity across IGOs", data=igo_analysis)
-
-
-
-```
-
-## Visualizing models
+## Visualizing models for part 1
 ```{r}
-
-models <- list("Two-way"=model1, "Time FE"=model2) 
+models <- list("Baseline" = model0, "Two-way"=model1, "Time FE"=model2) 
 
 result <- modelsummary(
   models,
   output = 'flextable',
   stars = TRUE,
-  vcov = list(vcovBK(model1), vcovBK(model2)),
+  vcov = list(vcovBK(model0), vcovBK(model1), vcovBK(model2)),
   coef_omit = 'Interc',
   inline_css = TRUE,
   bold_italicize_data = TRUE,
@@ -172,8 +164,115 @@ result %>%  # text and background color
     #bg(5, bg = 'lightblue') %>%
     # column widths
     autofit()
+```
+
+# Modeling part 2 - no hh
+```{r}
+model3 <-plm(DSM
+            ~ polyarchy + polyarchy_sd + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              fh_rol + wbgi_pve + 
+              cspf_sfi + alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+
+model4 <-plm(DSM
+            ~ polyarchy + polyarchy_sd + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              fh_rol + wbgi_pve + 
+              cspf_sfi + alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year", "cow_igocode"),
+            model = "within",
+            effect = "twoway"
+)
+```
+
+## Visualizing models for part 2 - no hh
+```{r}
+models2 <- list("Time"=model3, "Two-way"=model4) 
+
+result2 <- modelsummary(
+  models2,
+  output = 'flextable',
+  stars = TRUE,
+  vcov = list(vcovBK(model3), vcovBK(model4)),
+  coef_omit = 'Interc',
+  inline_css = TRUE,
+  bold_italicize_data = TRUE,
+  italicize = TRUE,
+  font_size = "12pt",  
+  override_css = list("body" = "font-family: 'Times New Roman';")
+)
+
+result2 %>%  # text and background color
+    color(3, color = 'red') %>%
+    #bg(5, bg = 'lightblue') %>%
+    # column widths
+    autofit()
+```
 
 
+# Modeling part 3 - parsimonious
+```{r}
+model5 <-plm(DSM
+            ~ polyarchy + polyarchy_sd + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+
+model6 <-plm(DSM
+            ~ polyarchy + polyarchy_sd + econ_sd + pooling + 
+              gdp_cap + population + trade +
+              globalization + globalization_political + 
+              alliances + ptsa + 
+              colonial + 
+              number + political + social + 1,
+            data = igo_analysis,
+            index = c("year", "cow_igocode"),
+            model = "within",
+            effect = "twoway"
+)
+```
+
+## Visualizing models for part 3 - parsimonious
+```{r}
+models3 <- list("Time"=model5, "Two-way"=model6) 
+
+result3 <- modelsummary(
+  models3,
+  output = 'flextable',
+  stars = TRUE,
+  vcov = list(vcovBK(model5), vcovBK(model6)),
+  coef_omit = 'Interc',
+  inline_css = TRUE,
+  bold_italicize_data = TRUE,
+  italicize = TRUE,
+  font_size = "12pt",  
+  override_css = list("body" = "font-family: 'Times New Roman';")
+)
+
+result3 %>%  # text and background color
+    color(3, color = 'red') %>%
+    #bg(5, bg = 'lightblue') %>%
+    # column widths
+    autofit()
 ```
 
 # Robustness check
@@ -235,4 +334,17 @@ robust_result %>%  # text and background color
     # bg(5, bg = 'lightblue') %>%
     # column widths
     autofit()
+```
+
+# Comparing Models and Missingness
+```{r}
+library(naniar)
+
+gg_miss_upset(igo_analysis)
+
+ggplot(igo_analysis, aes(x=cspf_sfi, y=DSM))+geom_miss_point()
+
+ggplot(igo_analysis, aes(x=cspf_sfi, y=DSM))+geom_miss_point()+facet_wrap(~typeI)
+
+gg_miss_fct(igo_analysis, year)
 ```
