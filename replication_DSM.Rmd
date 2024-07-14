@@ -1,0 +1,481 @@
+---
+title: "DSM and Heterogeneity modeling"
+author: "Jihyeon bae"
+date: "2024-01-29"
+output: html_document
+---
+
+
+# Introduction
+
+## Background and Goals
+
+- Constructing indicators to identify heterogeneity among an IGO's member states based on their regime types. 
+- Estimating the correlation between an IGO's political heterogeneity among members and its institutional design choice of Dispute Settlement Mechanism (DSM).
+
+
+# Setup and packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("pacman")
+p_load(plyr, dplyr, tidyr, ggplot2, tidyverse, RColorBrewer, readxl,
+       readr, haven, countrycode,
+       rqog, igoR, modelsummary, knitr, kableExtra, flextable, plm)
+
+```
+
+# Loading Raw data
+```{r, echo=FALSE, warning=FALSE}
+
+#Qualities of Government
+qog<-rqog::read_qog(which_data = "standard", data_type = "time-series") 
+
+qog<-qog%>%
+  filter(year>=1950 & year<2015) 
+
+#Measuring International Authority
+MIA <- read.csv("~/Desktop/Regime-Heterogeneity-and-DSM/data/raw/MIA_updated.csv")
+
+#Correlates of War
+COW<-igoR::igo_year_format3 %>%
+  filter(year>=1950)
+```
+
+---
+
+# Country-level variables
+
+```{r, echo = FALSE}
+country <-qog %>%
+  dplyr::select(cname, year, ccodecow, 
+         # World Development Indicators
+          wdi_gdpcapcon2015, wdi_pop, wdi_trade, 
+         # judicial corruption decision
+          vdem_jucorrdc, 
+          ciri_assn, #freedom of association
+          ciri_injud, # independence of the judiciary
+        # Security variables
+          atop_number, 
+        # Democracy Indices 
+          vdem_polyarchy, vdem_libdem, vdem_partipdem,
+        # Democracy Indices (Alternatives for robustness check)
+          p_polity2, bmr_dem, ht_regtype1,
+        # Globalization Index (political)
+           kofgi_dr_pg=dr_pg,
+        # colonial legacy
+           ht_colonial,
+        # Political Terror Scale
+         pts_ptsa=gd_ptsa) %>%  
+  dplyr::mutate(wdi_log_gdpcapcon2015=log(wdi_gdpcapcon2015),
+         wdi_log_pop=log(wdi_pop),
+         wdi_log_trade=log(wdi_trade))%>%
+  dplyr::rename(ccode=ccodecow)%>%
+  dplyr::relocate(ccode, cname, year)
+
+country <- country %>%
+  mutate(ht_colonial=ifelse(ht_colonial>1, 1, 0),
+         ht_regtype1=case_when(ht_regtype1==9 ~ 5, 
+                            ht_regtype1==99 ~ 6,
+                            ht_regtype1==100 ~ 7,
+                            TRUE ~ ht_regtype1))
+
+```
+
+```{r, echo = FALSE}
+#Check rows that have NA values for VARIABLE_OF_INTEREST
+country[is.na(country$ccode),]
+
+#Fill in NAs
+country$ccode[country$cname == "Ethiopia"] <- 530
+country$ccode[country$cname == "Germany"] <- 255
+country$ccode[country$cname == "Yemen Democratic"] <- 680
+country$ccode[country$cname == "Yemen"] <- 679
+country$ccode[country$cname == "Sudan"] <- 625
+country$ccode[country$cname == "Cyprus"] <- 352
+country$ccode[country$cname == "Pakistan"] <- 770
+country$ccode[country$cname == "Vietnam, North"] <- 816
+country$ccode[country$cname == "Vietnam, South"] <- 817
+country$cname[country$cname == "USSR"] <- "Russian Federation (the)"
+
+
+#Run below code to check year-availability for VARIABLE_OF_INTEREST
+#summary(country[!is.na(country$VARIABLE_OF_INTEREST),])
+
+country<-country%>%
+  filter(!is.na(ccode))
+```
+
+---
+
+## Transposing IGO-level data into country-level data
+
+- Pivot longer so that row represents country
+```{r}
+COW <- COW %>%
+  dplyr::rename(cow_igocode = ionum)%>%
+  dplyr::select(-c(igocode, version, accuracyofpre1965membershipdates,sourcesandnotes, imputed)) %>%
+  dplyr::relocate(cow_igocode, ioname, year, political, social, economic)%>%
+  pivot_longer(c(`afghanistan`:`zimbabwe`),
+                      names_to="country",
+                      values_to="membership")%>%
+  dplyr::filter(membership==1) #member states only
+
+```
+
+## Identify ambiguous country names
+```{r}
+COW <- COW %>%
+  mutate(country = recode(country, "austriahungary" = "Austria-Hungary",
+                          "domrepublic"="Dominican Republic",
+                          "etimor"="East Timor",
+                          "hessegrand"="Hesse Grand Ducal",
+                          "micronesiafs"="Federated States of Micronesia",
+                          "nokorea"="North Korea",
+                          "soafrica"="South Africa",
+                          "sokorea"="South Korea",
+                          "stlucia"="St. Lucia",
+                          "wgermany"="German Federal Republic",
+                          "syemen"="Yemen People's Republic",
+                          .default = country))
+
+#Attaching Country numeric code to character values
+COW$ccode<-countrycode(COW$country, 
+              origin='country.name', 
+              destination='cown', 
+              warn = TRUE)
+
+COW<-COW%>%
+  filter(!is.na(ccode))
+```
+
+
+## Extracting member-state information for each IGO
+```{r}
+igo_master <- COW %>%
+  dplyr::inner_join(country, by=c("ccode", "year"))%>%
+  dplyr::select(-c(orgname, longorgname, membership))
+
+
+igo_master <- igo_master %>%
+  group_by(cow_igocode, year)%>%
+  mutate(gdp_share= wdi_gdpcapcon2015/sum(wdi_gdpcapcon2015, na.rm=TRUE),
+         poly_share=vdem_polyarchy/sum(vdem_polyarchy, na.rm=TRUE))
+
+```
+
+
+
+# Variable Generation
+## summarising state level info to igo level
+```{r}
+igo <- igo_master %>%
+  dplyr::group_by(cow_igocode, ioname, year) %>%
+  dplyr::summarise(
+    #average democracy scores
+    polyarchy = mean(vdem_polyarchy, na.rm = TRUE),
+    w.polyarchy = weighted.mean(vdem_polyarchy, w = wdi_log_gdpcapcon2015/sum(wdi_log_gdpcapcon2015), na.rm=TRUE),
+    polyarchy_median = median(vdem_polyarchy, na.rm = TRUE),
+    partipdem = mean(vdem_partipdem, na.rm=TRUE),
+    partipdem_median = median(vdem_partipdem, na.rm=TRUE),
+    libdem = mean(vdem_libdem, na.rm = TRUE),
+    libdem_median = median(vdem_libdem, na.rm = TRUE),
+    #economic variables
+    gdp_cap = mean(wdi_log_gdpcapcon2015, na.rm = TRUE),
+    population=mean(wdi_log_pop, na.rm=TRUE),
+    trade=mean(wdi_log_trade, na.rm=TRUE),
+    globalization=mean(kofgi_dr_pg, na.rm=TRUE),
+    alliances = mean(atop_number, na.rm = TRUE),
+    # Governance
+    vdem_jucorrdc=mean(vdem_jucorrdc, na.rm = TRUE),
+    ciri_injud=mean(ciri_injud, na.rm=TRUE),
+    assn=mean(ciri_assn, na.rm=TRUE),
+    ptsa=mean(pts_ptsa, na.rm=TRUE), 
+    #characteristics 
+    number = n(),
+    trade = mean(wdi_log_trade, na.rm = TRUE),
+    percentage = sum(bmr_dem, na.rm = TRUE) / number,
+    political = mean(political, na.rm = TRUE),
+    social = mean(social, na.rm = TRUE),
+    economic = mean(economic, na.rm = TRUE),
+    colonial= sum(ht_colonial, na.rm=TRUE) / number,
+    #asymmetry index
+    polity_sd = sd(p_polity2, na.rm = TRUE),
+    polyarchy_sd = sd(vdem_polyarchy, na.rm = TRUE),
+    libdem_sd=sd(vdem_libdem, na.rm=TRUE),
+    partipdem_sd=sd(vdem_partipdem, na.rm=TRUE),
+    econ_sd = sd(wdi_log_gdpcapcon2015, na.rm = TRUE),
+    # HH index
+    hh_poly = sum(poly_share^2, na.rm = TRUE)- (1/number), 
+    hh_gdp = sum(gdp_share^2, na.rm = TRUE)- (1/number)
+)
+
+  
+```
+
+---
+
+# merging with MIA data
+```{r}
+MIA <- MIA %>%
+  dplyr::select(ionumber, year, inception, typeI, pooling, delegation, delconstit, poolconstit, DSM)%>%
+  dplyr::rename(cow_igocode = ionumber)
+
+igo_dataset <- MIA %>% dplyr::left_join(igo, by = c("cow_igocode", "year"))
+saveRDS(igo_dataset, "~/Desktop/Regime-Heterogeneity-and-DSM/data/processed/data_May2024.RDS")
+```
+
+
+# Data Analysis
+
+## Trend of International Organizations Over Time
+```{r, results='html', eval=FALSE}
+
+datasummary(All(igo_dataset) ~ Mean + SD + Min + Max, data = igo_dataset) %>%
+  kable(caption = "Data Summary") %>%
+  kable_styling(font_size = 12, latex_options = "scale_down", full_width = FALSE)
+
+```
+
+## Descriptive Visualization
+```{r warning=FALSE}
+
+library(gplots)
+
+# Create a plot for each year
+plot_year <- plotmeans(DSM ~ year, main = "Heterogeneity across IGOs", data = igo_dataset)
+
+# Save the plot as a PNG file with adjustable size
+png("plot_year.png", width = 10, height = 6, units = "in", res = 300)
+print(plot_year)
+dev.off()
+
+# Create a plot for each IGO
+plot_ioname <- plotmeans(DSM ~ ioname, main = "Average DSM score for IGOs", data = igo_dataset,
+                         n.label=FALSE, text.n.label="", las = 2)
+
+# Save the plot as a PNG file with adjustable size
+png("plot_ioname.png", width = 24, height = 8, units = "in", res = 300)
+print(plot_ioname)
+dev.off()
+
+
+```
+
+# Modeling Part 1 - Baseline for model 0, 1 (no hh), model 2 is full extension with hh variables. 
+```{r}
+library(lmtest)
+library(plm)
+
+model0 <-plm(DSM
+            ~ polyarchy + polyarchy_sd + econ_sd,
+            data = igo_dataset,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+#summary(model0, vcovBK(model0))
+
+model1 <-plm(DSM
+            ~ polyarchy + polyarchy_sd + econ_sd + 
+              pooling + 
+              ciri_injud + assn + vdem_jucorrdc +
+              gdp_cap + population + trade +
+               globalization + 
+              alliances + ptsa + 
+              colonial + number + political + social + 1,
+            data = igo_dataset,
+              index = c("year"),
+            model = "within",
+            effect = "time"
+)
+summary(model1, vcovBK(model1))
+
+
+#serial correlation
+library(tseries)
+filtered_data<-igo_dataset%>%filter(!is.na(DSM))
+panel.set<-plm.data(filtered_data, index=c("cow_igocode", "year"))
+adf.test(panel.set$DSM)
+#no unit roots are present here. 
+
+bptest(DSM~polyarchy_sd + factor(cow_igocode), data=panel.set, studentize=F)
+#Heteroskedasticity detected. 
+
+##Model 2 has HH variables
+model2 <-plm(DSM
+            ~ polyarchy + polyarchy_sd + econ_sd + 
+              hh_poly + hh_gdp +
+              pooling + 
+              ciri_injud + assn + vdem_jucorrdc +
+              gdp_cap + population + trade +
+               globalization + 
+              alliances + ptsa + 
+              colonial + number + political + social + 1,
+            data = igo_dataset,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+summary(model2, vcovBK(model2))
+
+```
+
+
+## Visualizing models 
+```{r}
+models1 <- list("Baseline" = model0, "Model 1"=model1, "Model 2"= model2) 
+
+result <- modelsummary(
+  models1,
+  output = 'flextable',
+  stars = TRUE,
+  vcov = list(vcovBK(model0), vcovBK(model1), vcovBK(model2)),
+  coef_omit = 'Interc',
+  inline_css = TRUE,
+  bold_italicize_data = TRUE,
+  italicize = TRUE,
+  font_size = "12pt",  
+  override_css = list("body" = "font-family: 'Times New Roman';")
+)
+
+result %>%  # text and background color
+    color(3, color = 'red') %>%
+    #bg(5, bg = 'lightblue') %>%
+    # column widths
+    autofit()
+
+cm <- c('hh_poly' = 'Political HHI',
+        'hh_gdp' = 'Economic HHI',
+        'social' = 'Social',
+        'political' = 'Political',
+        'colonial' = 'Colonial',
+        'ptsa' = 'Political Terror',
+        'alliances' = 'Alliances',
+        'globalization' = 'Political Globalization',
+        'trade' = 'Trade',
+        'population' = 'Population',
+        'gdp_cap' = 'GDP per capita',
+        'vdem_jucorrdc' = 'Judicial Corruption',
+        'assn' = 'Association', 
+        'ciri_injud' = 'Judiciary', 
+        'pooling' = 'Pooling',
+        'econ_sd' = 'Economic Heterogeneity', 
+        'polyarchy_sd' = 'Political Heterogeneity', 
+        'polyarchy' = 'Polyarchy')
+
+models <- list("Model 1"=model1, "Model 2"= model2) 
+
+
+modelplot(models, coef_omit = 'Interc', coef_map = cm) +
+    theme(text = element_text(family = "Times New Roman", size = 14))+
+    scale_x_continuous(limits=c(-1,1))+
+    aes(shape=model)+
+    scale_shape_manual(values=c(17, 16))+
+    scale_color_grey(start=0.2, end=0.6)
+
+# Dropping HH 
+
+cm2 <- c('social' = 'Social',
+        'political' = 'Political',
+        'colonial' = 'Colonial',
+        'ptsa' = 'Political Terror',
+        'alliances' = 'Alliances',
+        'globalization' = 'Political Globalization',
+        'trade' = 'Trade',
+        'population' = 'Population',
+        'gdp_cap' = 'GDP per capita',
+        'vdem_jucorrdc' = 'Judicial Corruption',
+        'assn' = 'Association', 
+        'ciri_injud' = 'Judiciary', 
+        'pooling' = 'Pooling',
+        'econ_sd' = 'Economic Heterogeneity', 
+        'polyarchy_sd' = 'Political Heterogeneity', 
+        'polyarchy' = 'Polyarchy')
+
+modelplot(models, coef_omit = 'Interc', coef_map = cm2)+
+    theme(text = element_text(family = "Times New Roman", size = 14))+
+    scale_x_continuous(limits=c(-1,1))+
+    aes(shape=model)+
+    scale_shape_manual(values=c(17, 16))+
+    scale_color_grey(start=0.2, end=0.6)
+
+```
+
+
+
+
+
+
+# Robustness check
+```{r, eval = TRUE}
+libdem <-plm(DSM
+            ~ libdem + libdem_sd + econ_sd + 
+              hh_poly + hh_gdp +
+              pooling + 
+              ciri_injud + assn + vdem_jucorrdc +
+              gdp_cap + population + trade +
+               globalization + 
+              alliances + ptsa + 
+              colonial + number + political + social + 1,
+            data = igo_dataset,
+            index = c("cow_igocode"),
+            model = "within",
+            effect = "time"
+)
+
+summary(libdem, vcovBK(libdem))
+
+particip <-plm(DSM
+            ~ partipdem + partipdem_sd +econ_sd + 
+             hh_poly + hh_gdp +
+              pooling + 
+              ciri_injud + assn + vdem_jucorrdc +
+              gdp_cap + population + trade +
+               globalization + 
+              alliances + ptsa + 
+              colonial + number + political + social + 1,
+            data = igo_dataset,
+            index = c("year"),
+            model = "within",
+            effect = "time"
+)
+
+
+
+robust_models<- list("Liberal"=libdem, "Participatory"=particip) 
+
+
+robust_result <- modelsummary(
+  robust_models,
+  output = 'flextable',
+  stars = TRUE,
+  vcov = list(vcovBK(libdem), vcovBK(particip)),
+  coef_omit = 'Interc',
+  inline_css = TRUE,
+  bold_italicize_data = TRUE,
+  italicize = TRUE,
+  font_size = "12pt",  
+  override_css = list("body" = "font-family: 'Times New Roman';")
+)
+
+robust_result %>%  # text and background color
+    color(c(3, 41), color = 'red') %>%
+    # bg(5, bg = 'lightblue') %>%
+    # column widths
+    autofit()
+
+```
+
+# Comparing Models and Missingness
+```{r, eval=FALSE}
+library(naniar)
+
+gg_miss_upset(igo_dataset)
+
+ggplot(igo_dataset, aes(x=cspf_sfi, y=DSM))+geom_miss_point()
+
+ggplot(igo_dataset, aes(x=cspf_sfi, y=DSM))+geom_miss_point()+facet_wrap(~typeI)
+
+gg_miss_fct(igo_dataset, year)
+```
